@@ -1,0 +1,324 @@
+// GhostPay Database Schema
+// This schema defines the data model for the GhostPay application
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// User & Authentication Models
+// ============================================
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  passwordHash      String
+  firstName         String?
+  lastName          String?
+  displayName       String?
+  avatarUrl         String?
+  emailVerified     Boolean   @default(false)
+  emailVerifiedAt   DateTime?
+  twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?
+  recoveryCodes     String?   // Encrypted recovery codes
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  isActive          Boolean   @default(true)
+  isDeleted         Boolean   @default(false)
+  deletedAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  masterWallet      MasterWallet?
+  disposableWallets DisposableWallet[]
+  walletAliases     WalletAlias[]
+  salaryCycles      SalaryCycle[]
+  transactions      Transaction[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  sessions          Session[]
+
+  @@index([email])
+  @@index([isActive])
+  @@map("users")
+}
+
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  token        String    @unique
+  refreshToken String?   @unique
+  userAgent    String?
+  ipAddress    String?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime? @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ============================================
+// Wallet Models
+// ============================================
+
+model MasterWallet {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  publicKey       String   @unique // Stellar public key
+  encryptedSecret String   // Encrypted secret key
+  derivationPath  String?  // HD wallet derivation path
+  balanceXlm      Decimal  @default(0) @db.Decimal(15, 7)
+  balanceUsdc     Decimal  @default(0) @db.Decimal(15, 2)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([publicKey])
+  @@map("master_wallets")
+}
+
+model DisposableWallet {
+  id              String    @id @default(cuid())
+  userId          String
+  publicKey       String    @unique // Stellar public key
+  encryptedSecret String    // Encrypted secret key
+  alias           String?   // User-friendly name
+  label           String?   // Label for the payment cycle
+  cycleId         String?   // Reference to salary cycle
+  balanceXlm      Decimal   @default(0) @db.Decimal(15, 7)
+  balanceUsdc     Decimal   @default(0) @db.Decimal(15, 2)
+  isActive        Boolean   @default(true)
+  isConsolidated  Boolean   @default(false)
+  consolidatedAt  DateTime?
+  consolidatedTo  String?   // Master wallet public key
+  lastSyncedAt    DateTime?
+  metadata        Json?     // Additional metadata
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([publicKey])
+  @@index([isActive])
+  @@index([isConsolidated])
+  @@index([cycleId])
+  @@map("disposable_wallets")
+}
+
+model WalletAlias {
+  id          String    @id @default(cuid())
+  userId      String
+  alias       String    // User-friendly alias
+  walletType  String    // MASTER or DISPOSABLE
+  walletId    String    // Reference to wallet public key
+  isPrimary   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, alias])
+  @@index([userId])
+  @@index([alias])
+  @@map("wallet_aliases")
+}
+
+// ============================================
+// Salary Cycle Models
+// ============================================
+
+model SalaryCycle {
+  id            String    @id @default(cuid())
+  userId        String
+  name          String    // e.g., "January 2024 Salary"
+  startDate     DateTime
+  endDate       DateTime
+  expectedAmount Decimal? @db.Decimal(15, 2)
+  currency      String    @default("XLM")
+  disposableWalletPublicKey String? // The wallet for this cycle
+  status        String    @default("PENDING") // PENDING, ACTIVE, COMPLETED, CONSOLIDATED
+  notes         String?
+  metadata      Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([startDate, endDate])
+  @@map("salary_cycles")
+}
+
+// ============================================
+// Transaction Models
+// ============================================
+
+model Transaction {
+  id                String    @id @default(cuid())
+  userId            String
+  stellarTxHash     String    @unique // Stellar transaction hash
+  fromAddress       String
+  toAddress         String
+  amount            Decimal   @db.Decimal(15, 7)
+  assetType         String    @default("native") // native, credit_alphanum4, credit_alphanum12
+  assetCode         String?   // e.g., "USDC"
+  assetIssuer       String?   // Asset issuer address
+  memo              String?
+  memoType          String?   // MEMO_TEXT, MEMO_ID, MEMO_HASH, MEMO_RETURN
+  fee               Decimal   @db.Decimal(15, 7)
+  status            String    @default("PENDING") // PENDING, CONFIRMED, FAILED
+  ledgerSequence    Int?
+  ledgerCloseTime   DateTime?
+  operationType     String?   // payment, path_payment_strict_send, etc.
+  cycleId           String?
+  isConsolidation   Boolean   @default(false)
+  direction         String    // INCOMING, OUTGOING
+  metadata          Json?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  salaryCycle SalaryCycle? @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([stellarTxHash])
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@index([status])
+  @@index([createdAt])
+  @@index([cycleId])
+  @@map("transactions")
+}
+
+// ============================================
+// Audit & Logging Models
+// ============================================
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  userId      String?
+  action      String    // WALLET_CREATED, WALLET_DELETED, CONSOLIDATION, etc.
+  resource    String?   // wallet, transaction, user, etc.
+  resourceId  String?   // ID of the affected resource
+  oldValue    Json?     // Previous state
+  newValue    Json?     // New state
+  ipAddress   String?
+  userAgent   String?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([resource, resourceId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================
+// Notification Models
+// ============================================
+
+model Notification {
+  id         String    @id @default(cuid())
+  userId     String
+  type       String    // PAYMENT_RECEIVED, CONSOLIDATION_COMPLETE, etc.
+  title      String
+  message    String
+  data       Json?
+  isRead     Boolean   @default(false)
+  readAt     DateTime?
+  actionUrl  String?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ============================================
+// System & Job Models
+// ============================================
+
+model ConsolidationJob {
+  id              String    @id @default(cuid())
+  userId          String?   // Null for system-wide jobs
+  status          String    @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED
+  walletsCount    Int       @default(0)
+  processedCount  Int       @default(0)
+  failedCount     Int       @default(0)
+  totalAmountXlm  Decimal?  @db.Decimal(15, 7)
+  totalAmountUsdc Decimal?  @db.Decimal(15, 2)
+  error           String?
+  metadata        Json?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("consolidation_jobs")
+}
+
+model SystemConfig {
+  key         String    @id
+  value       Json
+  description String?
+  isEncrypted Boolean   @default(false)
+  updatedAt   DateTime  @updatedAt
+  updatedBy   String?
+
+  @@map("system_configs")
+}
+
+// ============================================
+// TODO: Multi-signature support (Advanced)
+// ============================================
+
+// model MultiSigWallet {
+//   id          String    @id @default(cuid())
+//   userId      String
+//   publicKey   String    @unique
+//   threshold   Int       // Number of signatures required
+//   signers     Json      // Array of signer public keys
+//   createdAt   DateTime  @default(now())
+//   updatedAt   DateTime  @updatedAt
+// }
+
+// model MultiSigTransaction {
+//   id              String    @id @default(cuid())
+//   walletId        String
+//   stellarTxHash   String?
+//   proposedBy      String
+//   requiredSigs    Int
+//   currentSigs     Int
+//   signatures      Json      // Array of { signer, signature, signedAt }
+//   status          String    @default("PENDING")
+//   expiresAt       DateTime?
+//   createdAt       DateTime  @default(now())
+// }
